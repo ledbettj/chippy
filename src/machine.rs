@@ -108,9 +108,9 @@ impl Machine {
         self.display.send(payload).expect("Display disconnected");
         self.ip += 2;
       }
-      // [0x0, 0x0, 0xE, 0xE] => {
-      //   // RET
-      // },
+      [0x0, 0x0, 0xE, 0xE] => {
+        self.ip = self.stack.pop().expect("RET without CALL"); // RET
+      }
       [0x1, _, _, _] => {
         // JP
         self.ip = rest;
@@ -150,7 +150,7 @@ impl Machine {
         self.ip += 2;
       }
       [0x7, x, _, _] => {
-        self.registers[x as usize] += lo;
+        (self.registers[x as usize], _) = self.registers[x as usize].overflowing_add(lo);
         self.ip += 2;
       }
       [0x8, x, y, 0] => {
@@ -218,7 +218,6 @@ impl Machine {
         self.registers[x as usize] = fastrand::u8(..) & lo;
       }
       [0xD, x, y, n] => {
-        println!("draw instr");
         let bytes = &self.memory[(self.reg_i as usize)..][..(n as usize)];
         let coords = (
           self.registers[x as usize] as usize,
@@ -229,6 +228,28 @@ impl Machine {
           coords,
         };
         self.display.send(payload).expect("Display disconnected");
+        self.ip += 2;
+      }
+      // missing input
+      // missing timers
+      [0xF, x, 0x1, 0xE] => {
+        self.reg_i += self.registers[x as usize] as u16;
+        self.ip += 2;
+      }
+      // missing digits
+      // [0xF, x, 0x2, 0x9] => {
+
+      // },
+      [0xF, x, 0x5, 0x5] => {
+        for i in 0..(x + 1) {
+          self.memory[(self.reg_i + i) as usize] = self.registers[i as usize];
+        }
+        self.ip += 2;
+      }
+      [0xF, x, 0x6, 0x5] => {
+        for i in 0..(x + 1) {
+          self.registers[i as usize] = self.memory[(self.reg_i + i) as usize];
+        }
         self.ip += 2;
       }
       [_, _, _, _] => {

@@ -26,7 +26,8 @@ impl Screen {
         let (x, mut y) = coords;
         for byte in bytes {
           for i in 0..8 {
-            self.display[y][x + i] ^= if byte & 1 << ((7 - i) as u8) != 0 {
+            // TODO: check for erasure
+            self.display[y][(x + i) % Screen::WIDTH] ^= if byte & 1 << ((7 - i) as u8) != 0 {
               1
             } else {
               0

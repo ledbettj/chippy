@@ -12,8 +12,9 @@ use winit::event_loop::{ControlFlow, EventLoop};
 use winit::window::WindowBuilder;
 use winit_input_helper::WinitInputHelper;
 
-pub mod machine;
-pub mod screen;
+mod instruction;
+mod machine;
+mod screen;
 
 use machine::Machine;
 use screen::{Screen, ScreenUpdate};
@@ -34,18 +35,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
   }
 
   let (disp_tx, disp_rx) = mpsc::channel::<ScreenUpdate>();
-  let (input_tx, input_rx) = mpsc::channel::<ScreenUpdate>();
+  let (col_tx, col_rx) = mpsc::channel::<bool>();
+  let (key_tx, key_rx) = mpsc::channel::<u16>();
+
+  //let (input_tx, input_rx) = mpsc::channel::<ScreenUpdate>();
 
   thread::spawn(move || {
-    let mut m = Machine::load(&buf, disp_tx).expect("Failed to load");
+    let mut m = Machine::load(&buf, disp_tx, col_rx, key_rx).expect("Failed to load");
     println!("{}", m);
-    m.run(500);
+    m.run(500).expect("Panic");
   });
 
   let event_loop = EventLoop::new();
   let mut input = WinitInputHelper::new();
   let window = {
-    let size = LogicalSize::new(64.0 * 8.0, 32.0 * 8.0);
+    let size = LogicalSize::new(Screen::WIDTH as f64 * 16.0, Screen::HEIGHT as f64 * 16.0);
     WindowBuilder::new()
       .with_title("Hello Pixels")
       .with_inner_size(size)
@@ -61,11 +65,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
   };
 
   let mut screen = Screen::new();
+  let mut last_mask: u16 = 0;
 
   event_loop.run(move |event, _, control_flow| {
     // Update internal state and request a redraw
     while let Ok(msg) = disp_rx.try_recv() {
-      screen.update(&msg);
+      if let Some(col) = screen.update(&msg) {
+        col_tx.send(col).expect("Machine disconnected");
+      }
     }
 
     // Draw the current frame
@@ -92,6 +99,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
           *control_flow = ControlFlow::Exit;
           return;
         }
+      }
+
+      let keys = [
+        VirtualKeyCode::Key1,
+        VirtualKeyCode::Key2,
+        VirtualKeyCode::Key3,
+        VirtualKeyCode::Key4,
+        VirtualKeyCode::Q,
+        VirtualKeyCode::W,
+        VirtualKeyCode::E,
+        VirtualKeyCode::R,
+        VirtualKeyCode::W,
+        VirtualKeyCode::S,
+        VirtualKeyCode::D,
+        VirtualKeyCode::F,
+        VirtualKeyCode::Z,
+        VirtualKeyCode::X,
+        VirtualKeyCode::C,
+        VirtualKeyCode::V,
+      ];
+      let mut mask: u16 = 0;
+      for (i, &k) in keys.iter().enumerate() {
+        if input.key_held(k) {
+          mask = (i + 1) as u16;
+        }
+      }
+      if mask != last_mask {
+        key_tx.send(mask).expect("Machine disconnected");
+        last_mask = mask;
       }
 
       window.request_redraw();

@@ -11,8 +11,9 @@ pub enum ScreenUpdate {
 }
 
 impl Screen {
-  const WIDTH: usize = 64;
-  const HEIGHT: usize = 32;
+  pub const WIDTH: usize = 64;
+  pub const HEIGHT: usize = 32;
+  pub const COLOR: [u8; 4] = [0x00, 0xCC, 0x00, 0xFF];
 
   pub fn new() -> Self {
     Self {
@@ -20,24 +21,32 @@ impl Screen {
     }
   }
 
-  pub fn update(&mut self, msg: &ScreenUpdate) {
+  pub fn update(&mut self, msg: &ScreenUpdate) -> Option<bool> {
     match msg {
       ScreenUpdate::Draw { coords, bytes } => {
+        let mut col = false;
         let (x, mut y) = coords;
         for byte in bytes {
           for i in 0..8 {
             // TODO: check for erasure
-            self.display[y][(x + i) % Screen::WIDTH] ^= if byte & 1 << ((7 - i) as u8) != 0 {
+            let index = (x + i) % Screen::WIDTH;
+            let curr = self.display[y][index];
+            let bit = if byte & 1 << ((7 - i) as u8) != 0 {
               1
             } else {
               0
             };
+            let next = curr ^ bit;
+            self.display[y][index] = next;
+            col |= curr != next && next == 0;
           }
           y = (y + 1) % 64;
         }
+        Some(col)
       }
       ScreenUpdate::Clear => {
         self.display = [[0; Screen::WIDTH]; Screen::HEIGHT];
+        None
       }
     }
   }
@@ -48,7 +57,7 @@ impl Screen {
       let y = (i / 64) as usize;
 
       let color = if self.display[y][x] != 0 {
-        [0xFF, 0xFF, 0xFF, 0xFF]
+        Screen::COLOR
       } else {
         [0x00, 0x00, 0x00, 0xFF]
       };

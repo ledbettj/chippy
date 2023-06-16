@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 
 use fastrand;
 
+use crate::instruction::{Instruction, ParseError};
 use crate::screen::ScreenUpdate;
 
 pub struct Machine {
@@ -14,6 +15,284 @@ pub struct Machine {
   ip: u16,
   stack: Vec<u16>,
   display: mpsc::Sender<ScreenUpdate>,
+  collision: mpsc::Receiver<bool>,
+  keypad: mpsc::Receiver<u16>,
+  keys: u16,
+}
+
+impl Machine {
+  const MEMORY_SIZE: usize = 0x1000;
+  const REGISTER_COUNT: usize = 16;
+  const TIMER_COUNT: usize = 2;
+  const LOAD_ADDR: usize = 0x200;
+
+  pub fn load(
+    input: &[u8],
+    display: mpsc::Sender<ScreenUpdate>,
+    collision: mpsc::Receiver<bool>,
+    keypad: mpsc::Receiver<u16>,
+  ) -> Result<Self, ()> {
+    if input.len() > 0x1000 - Machine::LOAD_ADDR {
+      Err(())
+    } else {
+      let mut m = Machine::new(display, collision, keypad);
+      m.memory[Machine::LOAD_ADDR..][..input.len()].copy_from_slice(&input);
+      Ok(m)
+    }
+  }
+
+  pub fn new(
+    display: mpsc::Sender<ScreenUpdate>,
+    collision: mpsc::Receiver<bool>,
+    keypad: mpsc::Receiver<u16>,
+  ) -> Self {
+    Machine {
+      memory: [0; Machine::MEMORY_SIZE],
+      registers: [0; 16],
+      reg_i: 0,
+      timers: [0; 2],
+      ip: Machine::LOAD_ADDR as u16,
+      stack: vec![],
+      keys: 0,
+      display,
+      collision,
+      keypad,
+    }
+  }
+
+  pub fn run(&mut self, hz: u32) -> Result<(), ParseError> {
+    let interval_ms = Duration::from_secs_f64(1.0 / (hz as f64));
+    let mut last = Instant::now();
+
+    loop {
+      self.step()?;
+      // TODO: improve timing logic
+      let mut remaining = interval_ms.saturating_sub(Instant::now() - last);
+      while !remaining.is_zero() {
+        std::thread::sleep(Duration::from_micros(10));
+        remaining = interval_ms.saturating_sub(Instant::now() - last);
+      }
+      last = Instant::now();
+    }
+  }
+
+  fn reg(&self, r: u8) -> u8 {
+    self.registers[r as usize]
+  }
+
+  fn reg_set(&mut self, r: u8, v: u8) {
+    self.registers[r as usize] = v;
+  }
+
+  fn mem(&self, a: u16) -> u8 {
+    self.memory[a as usize]
+  }
+
+  fn mem_set(&mut self, a: u16, v: u8) {
+    self.memory[a as usize] = v;
+  }
+
+  fn eval_next(&mut self) -> Result<(), ParseError> {
+    let hi = self.memory[self.ip as usize];
+    let lo = self.memory[(self.ip + 1) as usize];
+    let instr: Instruction = ((hi as u16) << 8 | (lo as u16)).try_into()?;
+    //println!("{:?}: {:#02x}", instr, self.keys);
+    let next_instr = self.ip + 2;
+
+    self.ip = match instr {
+      Instruction::CLS => {
+        self
+          .display
+          .send(ScreenUpdate::Clear)
+          .expect("Display Disconnected!");
+        next_instr
+      }
+      Instruction::RET => self.stack.pop().expect("RET without CALL"),
+      Instruction::JP { a } => a,
+      Instruction::CALL { a } => {
+        self.stack.push(self.ip);
+        a
+      }
+      Instruction::SEi { r, v } => {
+        if self.reg(r) == v {
+          self.ip + 4
+        } else {
+          next_instr
+        }
+      }
+      Instruction::SNEi { r, v } => {
+        if self.reg(r) != v {
+          self.ip + 4
+        } else {
+          next_instr
+        }
+      }
+      Instruction::SEr { r1, r2 } => {
+        if self.reg(r1) == self.reg(r2) {
+          self.ip + 4
+        } else {
+          next_instr
+        }
+      }
+      Instruction::SETi { r, v } => {
+        self.reg_set(r, v);
+        next_instr
+      }
+      Instruction::ADDi { r, v } => {
+        let (result, _) = self.reg(r).overflowing_add(v);
+        self.reg_set(r, result);
+        next_instr
+      }
+      Instruction::SETr { r1, r2 } => {
+        self.reg_set(r1, self.reg(r2));
+        next_instr
+      }
+      Instruction::OR { r1, r2 } => {
+        self.registers[r1 as usize] |= self.reg(r2);
+        next_instr
+      }
+      Instruction::AND { r1, r2 } => {
+        self.registers[r1 as usize] &= self.reg(r2);
+        next_instr
+      }
+      Instruction::XOR { r1, r2 } => {
+        self.registers[r1 as usize] ^= self.reg(r2);
+        next_instr
+      }
+      Instruction::ADD { r1, r2 } => {
+        let (v, carry) = self.reg(r1).overflowing_add(self.reg(r2));
+        self.reg_set(r1, v);
+        self.reg_set(0xf, if carry { 1 } else { 0 });
+        next_instr
+      }
+      Instruction::SUB { r1, r2 } => {
+        let (v, carry) = self.reg(r1).overflowing_sub(self.reg(r2));
+        self.reg_set(r1, v);
+        self.reg_set(0xf, if carry { 1 } else { 0 });
+        next_instr
+      }
+      Instruction::SHR { r1, .. } => {
+        let (v, carry) = self.reg(r1).overflowing_shr(1);
+        self.reg_set(r1, v);
+        self.reg_set(0xf, if carry { 1 } else { 0 });
+        next_instr
+      }
+      Instruction::SUBN { r1, r2 } => {
+        let (v, carry) = self.reg(r2).overflowing_sub(self.reg(r1));
+        self.reg_set(r1, v);
+        self.reg_set(0xf, if carry { 1 } else { 0 });
+        next_instr
+      }
+      Instruction::SHL { r1, .. } => {
+        let (v, carry) = self.reg(r1).overflowing_shl(1);
+        self.reg_set(r1, v);
+        self.reg_set(0xf, if carry { 1 } else { 0 });
+        next_instr
+      }
+      Instruction::SNEr { r1, r2 } => {
+        if self.reg(r1) != self.reg(r2) {
+          self.ip + 4
+        } else {
+          next_instr
+        }
+      }
+      Instruction::LDI { a } => {
+        self.reg_i = a;
+        next_instr
+      }
+      Instruction::JPR { a } => a + self.reg(0) as u16,
+      Instruction::RND { r, v } => {
+        self.reg_set(r, fastrand::u8(..) & v);
+        next_instr
+      }
+      Instruction::DRW { r1, r2, v } => {
+        let bytes = &self.memory[(self.reg_i as usize)..][..(v as usize)];
+        let coords = (self.reg(r1) as usize, self.reg(r2) as usize);
+        self
+          .display
+          .send(ScreenUpdate::Draw {
+            bytes: bytes.to_vec(),
+            coords,
+          })
+          .expect("Display disconnected");
+        self.reg_set(
+          0xf,
+          if self.collision.recv().expect("Display disconnected") {
+            1
+          } else {
+            0
+          },
+        );
+        next_instr
+      }
+      Instruction::SKP { v } => {
+        println!("{:?}", instr);
+        println!("{:?}", self.keys);
+        if self.keys == v as u16 {
+          next_instr + 2
+        } else {
+          next_instr
+        }
+      }
+      Instruction::SKNP { v } => {
+        println!("{:?}", instr);
+        println!("{:?}", self.keys);
+        if self.keys != v as u16 {
+          next_instr + 2
+        } else {
+          next_instr
+        }
+      }
+      Instruction::LDT { r } => {
+        self.reg_set(r, self.timers[0]);
+        next_instr
+      }
+      Instruction::INP { r } => {
+        println!("unhandled instruction {:?}", instr);
+        // TODO: block for input
+        next_instr
+      }
+      Instruction::SDTr { r } => {
+        self.timers[0] = self.reg(r);
+        next_instr
+      }
+      Instruction::SSTr { r } => {
+        self.timers[1] = self.reg(r);
+        next_instr
+      }
+      Instruction::ADDI { r } => {
+        self.reg_i += self.reg(r) as u16;
+        next_instr
+      }
+      Instruction::STOR { r } => {
+        for i in 0..(r + 1) {
+          self.mem_set(self.reg_i + i as u16, self.reg(i));
+        }
+        next_instr
+      }
+      Instruction::LOAD { r } => {
+        for i in 0..(r + 1) {
+          self.reg_set(i, self.mem(self.reg_i + i as u16));
+        }
+        next_instr
+      }
+    };
+
+    Ok(())
+  }
+
+  fn step(&mut self) -> Result<(), ParseError> {
+    ////self.decrement_timers();
+    while let Ok(v) = self.keypad.try_recv() {
+      self.keys = v;
+    }
+    self.eval_next()
+  }
+
+  fn decrement_timers(&mut self) {
+    self.timers[0] = self.timers[0].saturating_sub(1);
+    self.timers[1] = self.timers[1].saturating_sub(1);
+  }
 }
 
 impl Display for Machine {
@@ -43,228 +322,5 @@ impl Display for Machine {
     }
 
     Ok(())
-  }
-}
-
-impl Machine {
-  const MEMORY_SIZE: usize = 0x1000;
-  const REGISTER_COUNT: usize = 16;
-  const TIMER_COUNT: usize = 2;
-  const LOAD_ADDR: usize = 0x200;
-
-  pub fn load(input: &[u8], display: mpsc::Sender<ScreenUpdate>) -> Result<Self, ()> {
-    if input.len() > 0x1000 - Machine::LOAD_ADDR {
-      Err(())
-    } else {
-      let mut m = Machine::new(display);
-      m.memory[Machine::LOAD_ADDR..][..input.len()].copy_from_slice(&input);
-      Ok(m)
-    }
-  }
-
-  pub fn new(display: mpsc::Sender<ScreenUpdate>) -> Self {
-    Machine {
-      memory: [0; Machine::MEMORY_SIZE],
-      registers: [0; 16],
-      reg_i: 0,
-      timers: [0; 2],
-      ip: Machine::LOAD_ADDR as u16,
-      stack: vec![],
-      display,
-    }
-  }
-
-  pub fn run(&mut self, hz: u32) {
-    let interval_ms = Duration::from_secs_f64(1.0 / (hz as f64));
-    let mut last = Instant::now();
-
-    loop {
-      self.step();
-      let remaining = interval_ms.saturating_sub(Instant::now() - last);
-      if remaining.is_zero() {
-        println!("Warning: unable to maintain Machine hz");
-      }
-      std::thread::sleep(remaining);
-      last = Instant::now();
-    }
-  }
-
-  fn eval_next(&mut self) {
-    let hi = self.memory[self.ip as usize];
-    let lo = self.memory[(self.ip + 1) as usize];
-    let instr = (hi as u16) << 8 | (lo as u16);
-    let rest = instr & 0x0FFF;
-    let nibbles = [
-      (0xF000 & instr) >> 12,
-      (0x0F00 & instr) >> 8,
-      (0x00F0 & instr) >> 4,
-      (0x000F & instr) >> 0,
-    ];
-    println!("{:#02x}", instr);
-    match nibbles {
-      [0x0, 0x0, 0xE, 0x0] => {
-        // CLS
-        let payload = ScreenUpdate::Clear;
-        self.display.send(payload).expect("Display disconnected");
-        self.ip += 2;
-      }
-      [0x0, 0x0, 0xE, 0xE] => {
-        self.ip = self.stack.pop().expect("RET without CALL"); // RET
-      }
-      [0x1, _, _, _] => {
-        // JP
-        self.ip = rest;
-      }
-      [0x2, _, _, _] => {
-        // CALL
-        self.stack.push(self.ip as u16);
-        self.ip = rest;
-      }
-      [0x3, x, _, _] => {
-        // SE
-        self.ip += if self.registers[x as usize] == lo {
-          4
-        } else {
-          2
-        };
-      }
-      [0x4, x, _, _] => {
-        // SNE
-        self.ip += if self.registers[x as usize] != lo {
-          4
-        } else {
-          2
-        };
-      }
-      [0x5, x, y, 0] => {
-        // SE
-        self.ip += if self.registers[x as usize] == self.registers[y as usize] {
-          4
-        } else {
-          2
-        };
-      }
-      [0x6, x, _, _] => {
-        // LD
-        self.registers[x as usize] = lo;
-        self.ip += 2;
-      }
-      [0x7, x, _, _] => {
-        (self.registers[x as usize], _) = self.registers[x as usize].overflowing_add(lo);
-        self.ip += 2;
-      }
-      [0x8, x, y, 0] => {
-        self.registers[x as usize] = self.registers[y as usize];
-        self.ip += 2;
-      }
-      [0x8, x, y, 1] => {
-        self.registers[x as usize] |= self.registers[y as usize];
-        self.ip += 2;
-      }
-      [0x8, x, y, 2] => {
-        self.registers[x as usize] &= self.registers[y as usize];
-        self.ip += 2;
-      }
-      [0x8, x, y, 3] => {
-        self.registers[x as usize] ^= self.registers[y as usize];
-        self.ip += 2;
-      }
-      [0x8, x, y, 4] => {
-        let (v, carry) = self.registers[x as usize].overflowing_add(self.registers[y as usize]);
-        self.registers[x as usize] = v;
-        self.registers[0xf] = if carry { 1 } else { 0 };
-        self.ip += 2;
-      }
-      [0x8, x, y, 5] => {
-        let (v, carry) = self.registers[x as usize].overflowing_sub(self.registers[y as usize]);
-        self.registers[x as usize] = v;
-        self.registers[0xf] = if carry { 1 } else { 0 };
-        self.ip += 2;
-      }
-      [0x8, x, _, 6] => {
-        let (v, carry) = self.registers[x as usize].overflowing_shr(1);
-        self.registers[x as usize] = v;
-        self.registers[0xf] = if carry { 1 } else { 0 };
-        self.ip += 2;
-      }
-      [0x8, x, y, 7] => {
-        let (v, carry) = self.registers[y as usize].overflowing_sub(self.registers[x as usize]);
-        self.registers[x as usize] = v;
-        self.registers[0xf] = if carry { 1 } else { 0 };
-        self.ip += 2;
-      }
-      [0x8, x, _, 0xE] => {
-        let (v, carry) = self.registers[x as usize].overflowing_shl(1);
-        self.registers[x as usize] = v;
-        self.registers[0xf] = if carry { 1 } else { 0 };
-        self.ip += 2;
-      }
-      [0x9, x, y, 0x0] => {
-        // SNE
-        self.ip += if self.registers[x as usize] != self.registers[y as usize] {
-          4
-        } else {
-          2
-        };
-      }
-      [0xA, _, _, _] => {
-        self.reg_i = rest;
-        self.ip += 2;
-      }
-      [0xB, _, _, _] => {
-        self.ip = rest + (self.registers[0] as u16);
-      }
-      [0xC, x, _, _] => {
-        self.registers[x as usize] = fastrand::u8(..) & lo;
-      }
-      [0xD, x, y, n] => {
-        let bytes = &self.memory[(self.reg_i as usize)..][..(n as usize)];
-        let coords = (
-          self.registers[x as usize] as usize,
-          self.registers[y as usize] as usize,
-        );
-        let payload = ScreenUpdate::Draw {
-          bytes: bytes.to_vec(),
-          coords,
-        };
-        self.display.send(payload).expect("Display disconnected");
-        self.ip += 2;
-      }
-      // missing input
-      // missing timers
-      [0xF, x, 0x1, 0xE] => {
-        self.reg_i += self.registers[x as usize] as u16;
-        self.ip += 2;
-      }
-      // missing digits
-      // [0xF, x, 0x2, 0x9] => {
-
-      // },
-      [0xF, x, 0x5, 0x5] => {
-        for i in 0..(x + 1) {
-          self.memory[(self.reg_i + i) as usize] = self.registers[i as usize];
-        }
-        self.ip += 2;
-      }
-      [0xF, x, 0x6, 0x5] => {
-        for i in 0..(x + 1) {
-          self.registers[i as usize] = self.memory[(self.reg_i + i) as usize];
-        }
-        self.ip += 2;
-      }
-      [_, _, _, _] => {
-        panic!("unimplemented instruction: {:#02x}", instr);
-      }
-    };
-  }
-
-  fn step(&mut self) {
-    ////self.decrement_timers();
-    self.eval_next();
-  }
-
-  fn decrement_timers(&mut self) {
-    self.timers[0] = self.timers[0].saturating_sub(1);
-    self.timers[1] = self.timers[1].saturating_sub(1);
   }
 }

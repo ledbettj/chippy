@@ -28,19 +28,15 @@ impl Screen {
         let (x, mut y) = coords;
         for byte in bytes {
           for i in 0..8 {
-            // TODO: check for erasure
             let index = (x + i) % Screen::WIDTH;
             let curr = self.display[y][index];
-            let bit = if byte & 1 << ((7 - i) as u8) != 0 {
-              1
-            } else {
-              0
-            };
+            let bit = (byte >> (7 - i)) & 1;
             let next = curr ^ bit;
             self.display[y][index] = next;
+            // if the pixel was on and is now off, signal a collision
             col |= curr != next && next == 0;
           }
-          y = (y + 1) % 64;
+          y = (y + 1) % Screen::WIDTH;
         }
         Some(col)
       }
@@ -53,8 +49,8 @@ impl Screen {
 
   pub fn draw(&self, frame: &mut [u8]) {
     for (i, pixel) in frame.chunks_exact_mut(4).enumerate() {
-      let x = (i % 64) as usize;
-      let y = (i / 64) as usize;
+      let x = (i % Screen::WIDTH) as usize;
+      let y = (i / Screen::WIDTH) as usize;
 
       let color = if self.display[y][x] != 0 {
         Screen::COLOR

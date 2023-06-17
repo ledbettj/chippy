@@ -36,7 +36,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
   let (disp_tx, disp_rx) = mpsc::channel::<ScreenUpdate>();
   let (col_tx, col_rx) = mpsc::channel::<bool>();
-  let (key_tx, key_rx) = mpsc::channel::<u16>();
+  let (key_tx, key_rx) = mpsc::channel::<u8>();
 
   //let (input_tx, input_rx) = mpsc::channel::<ScreenUpdate>();
 
@@ -65,7 +65,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
   };
 
   let mut screen = Screen::new();
-  let mut last_mask: u16 = 0;
+  let mut last_key: u8 = 0;
 
   event_loop.run(move |event, _, control_flow| {
     // Update internal state and request a redraw
@@ -119,15 +119,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         VirtualKeyCode::C,
         VirtualKeyCode::V,
       ];
-      let mut mask: u16 = 0;
+      let mut key: u8 = 0;
       for (i, &k) in keys.iter().enumerate() {
         if input.key_held(k) {
-          mask = (i + 1) as u16;
+          key = (i + 1) as u8;
         }
       }
-      if mask != last_mask {
-        key_tx.send(mask).expect("Machine disconnected");
-        last_mask = mask;
+      if key != last_key {
+        key_tx.send(key).expect("Machine disconnected");
+        last_key = key;
       }
 
       window.request_redraw();

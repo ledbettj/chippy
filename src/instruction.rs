@@ -1,5 +1,5 @@
 use std::error::Error;
-use std::fmt::Display;
+use std::fmt::{self, Display, Formatter};
 
 #[derive(Debug)]
 pub enum Instruction {
@@ -45,7 +45,7 @@ pub enum ParseError {
 impl Error for ParseError {}
 
 impl Display for ParseError {
-  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+  fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
     write!(f, "{:?}", self)
   }
 }
@@ -94,7 +94,7 @@ impl TryFrom<u16> for Instruction {
       [0xF, r, 0x1, 0x5] => Ok(Instruction::SDTr { r }),
       [0xF, r, 0x1, 0x8] => Ok(Instruction::SSTr { r }),
       [0xF, r, 0x1, 0xE] => Ok(Instruction::ADDI { r }),
-      // missing digits
+      // TODO: missing digit instructions
       [0xF, r, 0x5, 0x5] => Ok(Instruction::STOR { r }),
       [0xF, r, 0x6, 0x5] => Ok(Instruction::LOAD { r }),
       [_, _, _, _] => Err(ParseError::InvalidInstruction(instr)),

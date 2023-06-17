@@ -16,8 +16,8 @@ pub struct Machine {
   stack: Vec<u16>,
   display: mpsc::Sender<ScreenUpdate>,
   collision: mpsc::Receiver<bool>,
-  keypad: mpsc::Receiver<u16>,
-  keys: u16,
+  keypad: mpsc::Receiver<u8>,
+  keys: u8,
 }
 
 impl Machine {
@@ -30,7 +30,7 @@ impl Machine {
     input: &[u8],
     display: mpsc::Sender<ScreenUpdate>,
     collision: mpsc::Receiver<bool>,
-    keypad: mpsc::Receiver<u16>,
+    keypad: mpsc::Receiver<u8>,
   ) -> Result<Self, ()> {
     if input.len() > 0x1000 - Machine::LOAD_ADDR {
       Err(())
@@ -44,7 +44,7 @@ impl Machine {
   pub fn new(
     display: mpsc::Sender<ScreenUpdate>,
     collision: mpsc::Receiver<bool>,
-    keypad: mpsc::Receiver<u16>,
+    keypad: mpsc::Receiver<u8>,
   ) -> Self {
     Machine {
       memory: [0; Machine::MEMORY_SIZE],
@@ -96,7 +96,6 @@ impl Machine {
     let hi = self.memory[self.ip as usize];
     let lo = self.memory[(self.ip + 1) as usize];
     let instr: Instruction = ((hi as u16) << 8 | (lo as u16)).try_into()?;
-    //println!("{:?}: {:#02x}", instr, self.keys);
     let next_instr = self.ip + 2;
 
     self.ip = match instr {
@@ -115,21 +114,21 @@ impl Machine {
       }
       Instruction::SEi { r, v } => {
         if self.reg(r) == v {
-          self.ip + 4
+          next_instr + 2
         } else {
           next_instr
         }
       }
       Instruction::SNEi { r, v } => {
         if self.reg(r) != v {
-          self.ip + 4
+          next_instr + 2
         } else {
           next_instr
         }
       }
       Instruction::SEr { r1, r2 } => {
         if self.reg(r1) == self.reg(r2) {
-          self.ip + 4
+          next_instr + 2
         } else {
           next_instr
         }
@@ -191,7 +190,7 @@ impl Machine {
       }
       Instruction::SNEr { r1, r2 } => {
         if self.reg(r1) != self.reg(r2) {
-          self.ip + 4
+          next_instr + 2
         } else {
           next_instr
         }
@@ -226,18 +225,14 @@ impl Machine {
         next_instr
       }
       Instruction::SKP { v } => {
-        println!("{:?}", instr);
-        println!("{:?}", self.keys);
-        if self.keys == v as u16 {
+        if self.keys == v {
           next_instr + 2
         } else {
           next_instr
         }
       }
       Instruction::SKNP { v } => {
-        println!("{:?}", instr);
-        println!("{:?}", self.keys);
-        if self.keys != v as u16 {
+        if self.keys != v {
           next_instr + 2
         } else {
           next_instr
@@ -248,9 +243,12 @@ impl Machine {
         next_instr
       }
       Instruction::INP { r } => {
-        println!("unhandled instruction {:?}", instr);
-        // TODO: block for input
-        next_instr
+        if self.keys != 0 {
+          self.reg_set(r, self.keys);
+          next_instr
+        } else {
+          self.ip
+        }
       }
       Instruction::SDTr { r } => {
         self.timers[0] = self.reg(r);
@@ -297,20 +295,22 @@ impl Machine {
 
 impl Display for Machine {
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-    writeln!(f, "ip = {:#02x}", self.ip)?;
-    writeln!(f, "i = {:#02x}", self.reg_i)?;
+    writeln!(f, "ip={:#02x} i={:#02x}", self.ip, self.reg_i)?;
 
     for (index, value) in self.registers.iter().enumerate() {
-      writeln!(f, "r{} = {}", index, value)?;
+      write!(f, "r{}={} ", index, value)?;
     }
+    writeln!(f)?;
 
     for i in (0..Machine::MEMORY_SIZE).step_by(16) {
-      write!(f, "{:#02x}\t", i)?;
-      self.memory[i..(i + 16)].iter().for_each(|value| {
+      let row = &self.memory[i..(i + 16)];
+
+      write!(f, "{:#04x}\t", i)?;
+      row.iter().for_each(|value| {
         write!(f, "{:02x} ", value).unwrap();
       });
       write!(f, "\t")?;
-      self.memory[i..(i + 16)].iter().for_each(|&value| {
+      row.iter().for_each(|&value| {
         let ch = if value < 0x20 || value > 0x7e {
           '.'
         } else {
